@@ -193,6 +193,19 @@ def _load_koniq10k(csv_path: str, data_root: str) -> pd.DataFrame:
     )
     return df[["image_path", "mos"]]
 
+def _load_kadid10k(csv_path: str, data_root: str) -> pd.DataFrame:
+    """
+    Parse KADID-10k CSV into the standard (image_path, mos) format.
+
+    KADID-10k default CSV columns: ref_img, dis_img, dmos
+    """
+    df = pd.read_csv(csv_path)
+    df = df.rename(columns={"image": "image_path", "dmos": "mos"})
+    df["image_path"] = df["image_path"].apply(
+        lambda x: os.path.join(data_root, "images", str(x))
+    )
+    return df[["image_path", "mos"]]
+
 
 def _load_generic(csv_path: str) -> pd.DataFrame:
     """
@@ -234,6 +247,8 @@ def build_dataloaders(cfg: Config) -> Tuple[DataLoader, DataLoader, DataLoader]:
     dataset_name = cfg.dataset_name.lower()
     if dataset_name == "koniq10k":
         df = _load_koniq10k(cfg.csv_path, cfg.data_root)
+    elif dataset_name == "kadid10k":
+        df = _load_kadid10k(cfg.csv_path, cfg.data_root)
     else:
         # Generic CSV fallback
         df = _load_generic(cfg.csv_path)
