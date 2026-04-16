@@ -367,8 +367,8 @@ def train_student(cfg: Config) -> Tuple[StudentModel, EvalResult]:
         f"| Time: {epoch_time:.1f}s"
         )
 
-        if device.type == "cuda":
-            print_gpu_memory()
+        # if device.type == "cuda":
+        #     print_gpu_memory()
 
         # ---- Periodic validation ----------------------------------- #
         do_eval = (
