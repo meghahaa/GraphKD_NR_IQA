@@ -115,6 +115,7 @@ def train_one_epoch(
     device:    torch.device,
     epoch:     int,
     cfg:       Config,
+    pbar:      Optional[tqdm] = None,
 ) -> Dict[str, float]:
     """
     Run a single student training epoch with a tqdm inner progress bar.
@@ -206,6 +207,15 @@ def train_one_epoch(
         meters["reg"].update(reg.item(),    B)
         meters["rank"].update(rank.item(),  B)
         meters["graph"].update(graph.item(), B)
+
+        if pbar is not None:
+            pbar.update(1)
+            pbar.set_postfix(
+                loss=f"{meters['total'].avg:.4f}",
+                reg=f"{meters['reg'].avg:.4f}",
+                rank=f"{meters['rank'].avg:.4f}",
+                graph=f"{meters['graph'].avg:.4f}",
+            )
 
     current_lr = optimizer.param_groups[0]["lr"]
 
@@ -327,34 +337,38 @@ def train_student(cfg: Config) -> Tuple[StudentModel, EvalResult]:
     )
     print(f"{'='*65}\n")
 
-    epoch_bar = tqdm(
-        range(start_epoch, cfg.student_epochs),
-        desc="Epochs",
-        unit="epoch",
-        dynamic_ncols=True,
-    )
+    for epoch in range(start_epoch, cfg.student_epochs):
+        pbar = tqdm(
+        total=len(train_loader),
+        desc=f"Epoch {epoch+1}/{cfg.student_epochs}",
+        unit="batch",
+        dynamic_ncols=True
+        )
 
-    for epoch in epoch_bar:
         t0 = time.time()
 
         train_metrics = train_one_epoch(
             teacher, student, train_loader,
             criterion, optimizer, scaler,
             bank, device, epoch, cfg,
+            pbar=pbar  
         )
-        scheduler.step()
 
+        pbar.close()
+        scheduler.step()
         epoch_time = time.time() - t0
 
-        # Update outer bar postfix
-        epoch_bar.set_postfix(
-            loss=f"{train_metrics['total']:.4f}",
-            lr=f"{train_metrics['lr']:.1e}",
-            time=f"{epoch_time:.1f}s",
+        tqdm.write(
+        f"Epoch {epoch+1}/{cfg.student_epochs} "
+        f"| Loss: {train_metrics['total']:.4f} "
+        f"| Reg: {train_metrics['reg']:.4f} "
+        f"| Rank: {train_metrics['rank']:.4f} "
+        f"| Graph: {train_metrics['graph']:.4f} "
+        f"| Time: {epoch_time:.1f}s"
         )
 
         if device.type == "cuda":
-            print_gpu_memory()
+            tqdm.write(print_gpu_memory())
 
         # ---- Periodic validation ----------------------------------- #
         do_eval = (
@@ -413,7 +427,6 @@ def train_student(cfg: Config) -> Tuple[StudentModel, EvalResult]:
                 )
                 break
 
-    epoch_bar.close()
 
     # ---- Final test evaluation ------------------------------------ #
     print("\n[student_train] Loading best checkpoint for test evaluation …")
