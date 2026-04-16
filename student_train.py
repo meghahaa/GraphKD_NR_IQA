@@ -368,7 +368,7 @@ def train_student(cfg: Config) -> Tuple[StudentModel, EvalResult]:
         )
 
         if device.type == "cuda":
-            tqdm.write(print_gpu_memory())
+            print_gpu_memory()
 
         # ---- Periodic validation ----------------------------------- #
         do_eval = (
