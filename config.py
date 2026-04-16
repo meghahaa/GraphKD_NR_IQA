@@ -51,16 +51,23 @@ class Config:
     margin: float = 0.1               # Margin for ranking loss
 
     # ------------------------------------------------------------------ #
-    # Training – Student (filled later; kept here for completeness)
+    # Training – Student
     # ------------------------------------------------------------------ #
     student_epochs: int = 50
     student_lr: float = 1e-4
     student_weight_decay: float = 1e-4
     student_batch_size: int = 8
+    student_warmup_epochs: int = 5
 
     lambda_rank_student: float = 1.0
     lambda_reg_student: float = 1.0
     lambda_graph: float = 0.5          # Weight for graph-alignment distillation loss
+    graph_loss_type: str = "kl"        # "mse" | "kl"  – graph alignment loss variant
+    temperature: float = 0.07          # Softmax temperature for KL graph alignment
+
+    # Early stopping (shared by teacher and student)
+    early_stopping_patience: int = 10  # Stop after this many evals without improvement
+    early_stopping_min_delta: float = 1e-4  # Minimum SRCC improvement to count
 
     # ------------------------------------------------------------------ #
     # Data

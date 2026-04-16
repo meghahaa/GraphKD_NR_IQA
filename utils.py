@@ -268,8 +268,87 @@ def get_cosine_schedule_with_warmup(
 
 
 # ------------------------------------------------------------------ #
-# VRAM utilities
+# Early Stopping
 # ------------------------------------------------------------------ #
+
+class EarlyStopping:
+    """
+    Stops training when a monitored metric (SRCC) has not improved
+    by at least ``min_delta`` for ``patience`` consecutive evaluation rounds.
+
+    Parameters
+    ----------
+    patience  : int   – number of evaluation rounds without improvement
+                        before training is halted
+    min_delta : float – minimum change in monitored value to qualify as
+                        an improvement (default 1e-4)
+    mode      : str   – "max" (higher is better, e.g. SRCC) or
+                        "min" (lower is better, e.g. loss)
+
+    Usage
+    -----
+    stopper = EarlyStopping(patience=10)
+    for epoch in range(max_epochs):
+        val_srcc = evaluate(...)
+        if stopper(val_srcc):
+            print("Early stopping triggered.")
+            break
+    """
+
+    def __init__(
+        self,
+        patience: int = 10,
+        min_delta: float = 1e-4,
+        mode: str = "max",
+    ) -> None:
+        self.patience  = patience
+        self.min_delta = min_delta
+        self.mode      = mode
+        self.counter   = 0
+        self.best: Optional[float] = None
+        self.triggered = False
+
+    def __call__(self, metric: float) -> bool:
+        """
+        Call once per evaluation round.
+
+        Parameters
+        ----------
+        metric : float – current value of the monitored metric
+
+        Returns
+        -------
+        bool – True if training should stop, False otherwise
+        """
+        if self.best is None:
+            self.best = metric
+            return False
+
+        if self.mode == "max":
+            improved = metric > self.best + self.min_delta
+        else:
+            improved = metric < self.best - self.min_delta
+
+        if improved:
+            self.best    = metric
+            self.counter = 0
+        else:
+            self.counter += 1
+            print(
+                f"[EarlyStopping] No improvement for {self.counter}/{self.patience} "
+                f"rounds (best={self.best:.4f}, current={metric:.4f})"
+            )
+            if self.counter >= self.patience:
+                self.triggered = True
+                return True
+
+        return False
+
+    def reset(self) -> None:
+        """Reset state (useful when reusing for a new training run)."""
+        self.counter   = 0
+        self.best      = None
+        self.triggered = False
 
 def print_gpu_memory() -> None:
     """Print current CUDA memory usage (allocated / reserved)."""

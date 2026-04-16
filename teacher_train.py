@@ -35,6 +35,7 @@ import torch
 import torch.nn as nn
 from torch.cuda.amp import GradScaler
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from config import Config
 from datasets import build_dataloaders
@@ -43,6 +44,7 @@ from losses import TeacherTotalLoss
 from teacher import TeacherModel, build_teacher
 from utils import (
     AverageMeter,
+    EarlyStopping,
     get_cosine_schedule_with_warmup,
     get_device,
     load_checkpoint,
@@ -52,6 +54,11 @@ from utils import (
     set_seed,
 )
 
+# ------------------------------------------------------------------ #
+# Wrapper to extract state_dict from a possibly DataParallel-wrapped model
+# ------------------------------------------------------------------ #
+def get_model_state_dict(model):
+    return model.module.state_dict() if isinstance(model, nn.DataParallel) else model.state_dict()
 
 # ------------------------------------------------------------------ #
 # One training epoch
@@ -92,7 +99,15 @@ def train_one_epoch(
         "rank":  AverageMeter("rank"),
     }
 
-    for batch_idx, batch in enumerate(loader):
+    pbar = tqdm(
+        loader,
+        desc=f"Epoch {epoch + 1:>3d} [train]",
+        unit="batch",
+        dynamic_ncols=True,
+        leave=False,
+    )
+
+    for batch in pbar:
         images  = batch["image"].to(device, non_blocking=True)  # (B, 3, H, W)
         targets = batch["mos"].to(device, non_blocking=True)     # (B,)
         B = images.size(0)
@@ -125,13 +140,13 @@ def train_one_epoch(
         meters["reg"].update(reg.item(),   B)
         meters["rank"].update(rank.item(), B)
 
-        if batch_idx % 50 == 0:
-            print(
-                f"  Epoch {epoch+1} [{batch_idx}/{len(loader)}]  "
-                f"loss={meters['total'].avg:.4f}  "
-                f"reg={meters['reg'].avg:.4f}  "
-                f"rank={meters['rank'].avg:.4f}"
-            )
+        pbar.set_postfix(
+            loss=f"{meters['total'].avg:.4f}",
+            reg=f"{meters['reg'].avg:.4f}",
+            rank=f"{meters['rank'].avg:.4f}",
+        )
+
+    pbar.close()
 
     current_lr = optimizer.param_groups[0]["lr"]
     return {
@@ -167,6 +182,10 @@ def train_teacher(cfg: Config) -> Tuple[TeacherModel, EvalResult]:
 
     # ---- Model ----------------------------------------------------- #
     model = build_teacher(cfg).to(device)
+
+    if torch.cuda.device_count() > 1 and device.type == "cuda":
+        print(f"[INFO] Using DataParallel on {torch.cuda.device_count()} GPUs")
+        model = nn.DataParallel(model)
     print_model_info(model, name="Teacher")
 
     # Optionally resume from checkpoint
@@ -201,6 +220,13 @@ def train_teacher(cfg: Config) -> Tuple[TeacherModel, EvalResult]:
     best_srcc  = -1.0
     best_result: EvalResult | None = None
 
+    # ---- Early stopping ------------------------------------------- #
+    early_stopper = EarlyStopping(
+        patience=cfg.early_stopping_patience,
+        min_delta=cfg.early_stopping_min_delta,
+        mode="max",
+    )
+
     # ---- WandB (optional) ----------------------------------------- #
     if cfg.use_wandb:
         try:
@@ -221,7 +247,14 @@ def train_teacher(cfg: Config) -> Tuple[TeacherModel, EvalResult]:
     print(f"  Teacher training on {device}  |  epochs={cfg.teacher_epochs}")
     print(f"{'='*60}\n")
 
-    for epoch in range(start_epoch, cfg.teacher_epochs):
+    epoch_bar = tqdm(
+        range(start_epoch, cfg.teacher_epochs),
+        desc="Epochs",
+        unit="epoch",
+        dynamic_ncols=True,
+    )
+
+    for epoch in epoch_bar:
         t0 = time.time()
 
         train_metrics = train_one_epoch(
@@ -230,11 +263,10 @@ def train_teacher(cfg: Config) -> Tuple[TeacherModel, EvalResult]:
         scheduler.step()
 
         epoch_time = time.time() - t0
-        print(
-            f"Epoch {epoch+1}/{cfg.teacher_epochs}  "
-            f"loss={train_metrics['total']:.4f}  "
-            f"lr={train_metrics['lr']:.2e}  "
-            f"time={epoch_time:.1f}s"
+        epoch_bar.set_postfix(
+            loss=f"{train_metrics['total']:.4f}",
+            lr=f"{train_metrics['lr']:.1e}",
+            time=f"{epoch_time:.1f}s",
         )
 
         if device.type == "cuda":
@@ -247,17 +279,23 @@ def train_teacher(cfg: Config) -> Tuple[TeacherModel, EvalResult]:
                 image_size=cfg.image_size,
                 amp=cfg.amp,
             )
-            print(f"  [VAL] {result}")
+            tqdm.write(
+                f"\n  [VAL] Epoch {epoch+1}  "
+                f"SRCC={result.srcc:.4f}  PLCC={result.plcc:.4f}  "
+                f"MAE={result.mae:.4f}  "
+                f"Inf={result.inference_ms:.1f}ms"
+            )
 
             is_best = result.srcc > best_srcc
             if is_best:
                 best_srcc   = result.srcc
                 best_result = result
+                tqdm.write(f"  ✓ New best SRCC = {best_srcc:.4f}")
 
             # Save checkpoint
             state = {
                 "epoch":              epoch + 1,
-                "model_state_dict":   model.state_dict(),
+                "model_state_dict": get_model_state_dict(model),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "best_srcc":          best_srcc,
                 "config":             vars(cfg),
@@ -276,6 +314,16 @@ def train_teacher(cfg: Config) -> Tuple[TeacherModel, EvalResult]:
                     "val/plcc":   result.plcc,
                     "val/mae":    result.mae,
                 })
+
+            # ---- Early stopping check ----------------------------- #
+            if early_stopper(result.srcc):
+                tqdm.write(
+                    f"\n[EarlyStopping] Triggered at epoch {epoch+1}. "
+                    f"Best SRCC = {best_srcc:.4f}"
+                )
+                break
+
+    epoch_bar.close()
 
     # ---- Final evaluation on test set ------------------------------ #
     print("\n[teacher_train] Loading best checkpoint for test evaluation …")

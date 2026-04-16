@@ -54,7 +54,7 @@ def get_train_transform(image_size: int = 224) -> transforms.Compose:
     """
     return transforms.Compose(
         [
-            transforms.Resize((image_size + 32, image_size + 32)),
+            transforms.Resize((image_size + 32, image_size + 32)), 
             transforms.RandomCrop(image_size),
             transforms.RandomHorizontalFlip(),
             transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
@@ -103,7 +103,10 @@ class IQADataset(Dataset):
 
     Reads a CSV that must contain at least two columns:
       - ``image_path`` : absolute or relative path to the image file.
-      - ``mos``        : Mean Opinion Score (any scale; normalised to [0,1]).
+      - ``mos``        : Mean Opinion Score (any scale; normalised to [0,1] later). higher = better quality
+
+    Has utility for dmos column , inverted to mos by 1 - dmos, so that higher is always better for consistency across datasets. 
+    Set is_mos=False in constructor to enable this inversion.
 
     Parameters
     ----------
@@ -126,6 +129,7 @@ class IQADataset(Dataset):
         df: pd.DataFrame,
         transform: Optional[Callable] = None,
         data_root: str = "",
+        is_mos: bool = True,
     ) -> None:
         super().__init__()
         self.transform = transform
@@ -144,6 +148,9 @@ class IQADataset(Dataset):
             self.mos = raw_mos * 0.0  # edge case: constant scores
         else:
             self.mos = (raw_mos - mos_min) / (mos_max - mos_min)
+        
+        if not is_mos:
+            self.mos = 1.0 - self.mos  # Invert if lower scores are better (e.g., DMOS)
 
     # -------------------------------------------------------------- #
 
