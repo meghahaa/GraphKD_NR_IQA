@@ -149,15 +149,7 @@ def train_one_epoch(
 
     use_amp = cfg.amp and device.type == "cuda"
 
-    pbar = tqdm(
-        loader,
-        desc=f"Epoch {epoch + 1:>3d} [train]",
-        unit="batch",
-        dynamic_ncols=True,
-        leave=False,
-    )
-
-    for batch in pbar:
+    for batch in loader:
         images  = batch["image"].to(device, non_blocking=True)   # (B, 3, H, W)
         targets = batch["mos"].to(device, non_blocking=True)      # (B,)
         B = images.size(0)
@@ -215,14 +207,6 @@ def train_one_epoch(
         meters["rank"].update(rank.item(),  B)
         meters["graph"].update(graph.item(), B)
 
-        pbar.set_postfix(
-            loss=f"{meters['total'].avg:.4f}",
-            reg=f"{meters['reg'].avg:.4f}",
-            rank=f"{meters['rank'].avg:.4f}",
-            graph=f"{meters['graph'].avg:.4f}",
-        )
-
-    pbar.close()
     current_lr = optimizer.param_groups[0]["lr"]
 
     return {
