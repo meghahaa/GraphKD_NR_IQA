@@ -269,8 +269,8 @@ def train_teacher(cfg: Config) -> Tuple[TeacherModel, EvalResult]:
             time=f"{epoch_time:.1f}s",
         )
 
-        if device.type == "cuda":
-            print_gpu_memory()
+        # if device.type == "cuda":
+        #     print_gpu_memory()
 
         # ---- Periodic validation ----------------------------------- #
         if (epoch + 1) % cfg.eval_every_n_epochs == 0 or epoch == cfg.teacher_epochs - 1:
