@@ -73,6 +73,7 @@ def train_one_epoch(
     device: torch.device,
     epoch: int,
     cfg: Config,
+    pbar: tqdm | None = None,
 ) -> Dict[str, float]:
     """
     Run a single training epoch.
@@ -99,15 +100,8 @@ def train_one_epoch(
         "rank":  AverageMeter("rank"),
     }
 
-    pbar = tqdm(
-        loader,
-        desc=f"Epoch {epoch + 1:>3d} [train]",
-        unit="batch",
-        dynamic_ncols=True,
-        leave=False,
-    )
 
-    for batch in pbar:
+    for batch in loader:
         images  = batch["image"].to(device, non_blocking=True)  # (B, 3, H, W)
         targets = batch["mos"].to(device, non_blocking=True)     # (B,)
         B = images.size(0)
@@ -140,13 +134,13 @@ def train_one_epoch(
         meters["reg"].update(reg.item(),   B)
         meters["rank"].update(rank.item(), B)
 
-        pbar.set_postfix(
-            loss=f"{meters['total'].avg:.4f}",
-            reg=f"{meters['reg'].avg:.4f}",
-            rank=f"{meters['rank'].avg:.4f}",
-        )
-
-    pbar.close()
+        if pbar is not None:
+            pbar.update(1)
+            pbar.set_postfix(
+                loss=f"{meters['total'].avg:.4f}",
+                reg=f"{meters['reg'].avg:.4f}",
+                rank=f"{meters['rank'].avg:.4f}",
+            )
 
     current_lr = optimizer.param_groups[0]["lr"]
     return {
@@ -247,26 +241,28 @@ def train_teacher(cfg: Config) -> Tuple[TeacherModel, EvalResult]:
     print(f"  Teacher training on {device}  |  epochs={cfg.teacher_epochs}")
     print(f"{'='*60}\n")
 
-    epoch_bar = tqdm(
-        range(start_epoch, cfg.teacher_epochs),
-        desc="Epochs",
-        unit="epoch",
-        dynamic_ncols=True,
-    )
-
-    for epoch in epoch_bar:
+    for epoch in range(start_epoch, cfg.teacher_epochs):
+        pbar = tqdm(
+        total=len(train_loader),
+        desc=f"Epoch {epoch+1}/{cfg.teacher_epochs}",
+        unit="batch",
+        dynamic_ncols=True
+        )
         t0 = time.time()
 
         train_metrics = train_one_epoch(
-            model, train_loader, criterion, optimizer, scaler, device, epoch, cfg
+            model, train_loader, criterion, optimizer, scaler, device, epoch, cfg,pbar=pbar
         )
+        pbar.close()
         scheduler.step()
-
         epoch_time = time.time() - t0
-        epoch_bar.set_postfix(
-            loss=f"{train_metrics['total']:.4f}",
-            lr=f"{train_metrics['lr']:.1e}",
-            time=f"{epoch_time:.1f}s",
+        
+        tqdm.write(
+        f"Epoch {epoch+1}/{cfg.teacher_epochs} "
+        f"| Loss: {train_metrics['total']:.4f} "
+        f"| Reg: {train_metrics['reg']:.4f} "
+        f"| Rank: {train_metrics['rank']:.4f} "
+        f"| Time: {epoch_time:.1f}s"
         )
 
         # if device.type == "cuda":
@@ -323,7 +319,6 @@ def train_teacher(cfg: Config) -> Tuple[TeacherModel, EvalResult]:
                 )
                 break
 
-    epoch_bar.close()
 
     # ---- Final evaluation on test set ------------------------------ #
     print("\n[teacher_train] Loading best checkpoint for test evaluation …")
