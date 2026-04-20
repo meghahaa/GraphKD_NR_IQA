@@ -30,7 +30,7 @@ from tqdm import tqdm
 from config import Config
 from datasets import build_dataloaders
 from evaluate import EvalResult, evaluate_model
-from losses import TeacherTotalLoss          # reg + ranking, reused as-is
+from losses import TeacherTotalLoss
 from student import StudentModel, build_student
 from utils import (
     AverageMeter,
@@ -83,15 +83,15 @@ def train_one_epoch_baseline(
         "rank":  AverageMeter("rank"),
     }
 
+    use_amp = cfg.amp and device.type == "cuda"
+
     pbar = tqdm(
         loader,
-        desc=f"Epoch {epoch + 1:>3d} [train]",
+        desc=f"Epoch {epoch + 1:>3d}/{cfg.student_epochs}",
         unit="batch",
         dynamic_ncols=True,
-        leave=False,
+        leave=True,       # stays on screen after epoch completes
     )
-
-    use_amp = cfg.amp and device.type == "cuda"
 
     for batch in pbar:
         images  = batch["image"].to(device, non_blocking=True)  # (B, 3, H, W)
@@ -104,8 +104,8 @@ def train_one_epoch_baseline(
         if use_amp:
             with torch.autocast(device_type="cuda", dtype=torch.float16):
                 _emb, predictions, _feat = model(images)  # (B,E), (B,1), (B,F)
-            # criterion always in float32 to avoid AMP numerical issues
-            # in the pairwise ranking loss (small differences, masking)
+            # criterion in float32 to avoid AMP numerical issues
+            # in pairwise ranking loss (small differences + masking)
             total, reg, rank = criterion(predictions.float(), targets)
         else:
             _emb, predictions, _feat = model(images)
@@ -237,14 +237,7 @@ def train_student_baseline(cfg: Config) -> Tuple[StudentModel, EvalResult]:
     print(f"  Student Baseline (no KD) on {device}  |  epochs={cfg.student_epochs}")
     print(f"{'='*60}\n")
 
-    epoch_bar = tqdm(
-        range(start_epoch, cfg.student_epochs),
-        desc="Epochs",
-        unit="epoch",
-        dynamic_ncols=True,
-    )
-
-    for epoch in epoch_bar:
+    for epoch in range(start_epoch, cfg.student_epochs):
         t0 = time.time()
 
         train_metrics = train_one_epoch_baseline(
@@ -253,10 +246,12 @@ def train_student_baseline(cfg: Config) -> Tuple[StudentModel, EvalResult]:
         )
         scheduler.step()
 
-        epoch_bar.set_postfix(
-            loss=f"{train_metrics['total']:.4f}",
-            lr=f"{train_metrics['lr']:.1e}",
-            time=f"{time.time() - t0:.1f}s",
+        print(
+            f"  → Loss: {train_metrics['total']:.4f}  "
+            f"Reg: {train_metrics['reg']:.4f}  "
+            f"Rank: {train_metrics['rank']:.4f}  "
+            f"LR: {train_metrics['lr']:.1e}  "
+            f"Time: {time.time() - t0:.1f}s"
         )
 
         # ---- Periodic validation ------------------------------------ #
@@ -270,8 +265,8 @@ def train_student_baseline(cfg: Config) -> Tuple[StudentModel, EvalResult]:
                 image_size=cfg.image_size,
                 amp=cfg.amp,
             )
-            tqdm.write(
-                f"\n  [VAL] Epoch {epoch+1}  "
+            print(
+                f"  [VAL] Epoch {epoch+1}  "
                 f"SRCC={result.srcc:.4f}  PLCC={result.plcc:.4f}  "
                 f"MAE={result.mae:.4f}  "
                 f"Inf={result.inference_ms:.1f}ms"
@@ -281,7 +276,7 @@ def train_student_baseline(cfg: Config) -> Tuple[StudentModel, EvalResult]:
             if is_best:
                 best_srcc   = result.srcc
                 best_result = result
-                tqdm.write(f"  ✓ New best SRCC = {best_srcc:.4f}")
+                print(f"  ✓ New best SRCC = {best_srcc:.4f}")
 
             state = {
                 "epoch":                epoch + 1,
@@ -306,13 +301,11 @@ def train_student_baseline(cfg: Config) -> Tuple[StudentModel, EvalResult]:
                 })
 
             if early_stopper(result.srcc):
-                tqdm.write(
+                print(
                     f"\n[EarlyStopping] Triggered at epoch {epoch+1}. "
                     f"Best SRCC = {best_srcc:.4f}"
                 )
                 break
-
-    epoch_bar.close()
 
     # ---- Final test evaluation ------------------------------------- #
     print("\n[student_baseline] Loading best checkpoint for test evaluation …")
