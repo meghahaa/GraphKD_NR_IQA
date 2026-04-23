@@ -18,6 +18,7 @@ Contents
 from __future__ import annotations
 
 import os
+from pyexpat import model
 import random
 import math
 from typing import Any, Dict, Optional
@@ -219,7 +220,11 @@ def load_checkpoint(
     """
     map_location = device if device is not None else torch.device("cpu")
     ckpt = torch.load(path, map_location=map_location)
-    model.load_state_dict(ckpt["model_state_dict"])
+    state_dict = ckpt["model_state_dict"]
+    # Strip "module." prefix if checkpoint was saved from a DataParallel model
+    if all(k.startswith("module.") for k in state_dict.keys()):
+        state_dict = {k[len("module."):]: v for k, v in state_dict.items()}
+    model.load_state_dict(state_dict)
     if optimizer is not None and "optimizer_state_dict" in ckpt:
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
     print(f"[utils] Loaded checkpoint from '{path}' (epoch {ckpt.get('epoch', '?')})")
