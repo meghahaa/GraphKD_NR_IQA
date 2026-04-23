@@ -243,7 +243,7 @@ class TeacherModel(nn.Module):
     
     # ------------------------------------------------------------------ #
 
-     extract_embeddings(self, x: torch.Tensor) -> torch.Tensor:
+    def extract_embeddings(self, x: torch.Tensor) -> torch.Tensor:
         """
         Parameters
         ----------
