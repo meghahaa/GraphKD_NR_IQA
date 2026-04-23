@@ -316,6 +316,7 @@ def train_student_baseline(cfg: Config) -> Tuple[StudentModel, EvalResult]:
         model, test_loader, device,
         image_size=cfg.image_size,
         amp=False,
+        num_patches=cfg.num_patches,
     )
     print(f"\n[TEST] {test_result}\n")
 

@@ -107,6 +107,65 @@ class RegressionHead(nn.Module):
         """
         return self.net(z)
 
+class AttentionPool(nn.Module):
+    """
+    Learned weighted aggregation across patch embeddings.
+
+    Given P patch embeddings, computes a single image-level embedding
+    as a weighted sum where weights are produced by a small MLP scorer.
+
+    Architecture:
+        score_i = MLP(z_i)          scalar logit per patch
+        w_i     = softmax(scores)   normalised attention weight
+        out     = Σ w_i · z_i       weighted sum
+
+    Parameters
+    ----------
+    embed_dim : int – dimensionality of patch embeddings (= cfg.embed_dim)
+
+    Input
+    -----
+    z : Tensor of shape (B, P, embed_dim)
+        P patch embeddings per image, already L2-normalised.
+
+    Output
+    ------
+    pooled : Tensor of shape (B, embed_dim)
+             Attention-weighted sum, re-normalised to unit L2 norm.
+    weights : Tensor of shape (B, P)
+              Softmax attention weights (useful for visualisation).
+    """
+
+    def __init__(self, embed_dim: int) -> None:
+        super().__init__()
+        # Small MLP: embed_dim → embed_dim//2 → 1
+        self.scorer = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim // 2),
+            nn.Tanh(),
+            nn.Linear(embed_dim // 2, 1),
+        )
+
+    def forward(
+        self, z: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Parameters
+        ----------
+        z : (B, P, embed_dim)
+
+        Returns
+        -------
+        pooled  : (B, embed_dim)  L2-normalised aggregated embedding
+        weights : (B, P)          attention weights
+        """
+        logits  = self.scorer(z).squeeze(-1)          # (B, P)
+        weights = torch.softmax(logits, dim=1)         # (B, P)
+        pooled  = torch.bmm(
+            weights.unsqueeze(1), z
+        ).squeeze(1)                                   # (B, embed_dim)
+        pooled  = nn.functional.normalize(pooled, dim=1)  # L2 norm
+        return pooled, weights
+
 
 class TeacherModel(nn.Module):
     """
@@ -141,70 +200,76 @@ class TeacherModel(nn.Module):
         self.backbone_out_dim: int = feat.shape[-1]  # e.g. 768 for swin_tiny
 
         # ---- Heads --------------------------------------------------- #
-        self.proj_head = ProjectionHead(self.backbone_out_dim, cfg.embed_dim)
-        self.reg_head = RegressionHead(cfg.embed_dim)
+        self.proj_head   = ProjectionHead(self.backbone_out_dim, cfg.embed_dim)
+        self.attn_pool   = AttentionPool(cfg.embed_dim)
+        self.reg_head    = RegressionHead(cfg.embed_dim)
+        # ------------------------------------------------------------------ #
 
-    # ------------------------------------------------------------------ #
 
     def forward(
         self, x: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Full forward pass.
+        Multi-patch forward pass.
 
         Parameters
         ----------
-        x : Tensor of shape (B, 3, H, W)
-            Batch of RGB images, normalised to ImageNet stats.
+        x : Tensor of shape (B, P, 3, H, W)
+            B images, each with P patch views (P = num_patches + 1).
 
         Returns
         -------
-        embeddings        : (B, embed_dim)  L2-normalised projected features
+        embeddings        : (B, embed_dim)  attention-pooled L2-normalised embedding
         predictions       : (B, 1)          MOS prediction in [0, 1]
-        backbone_features : (B, backbone_out_dim)  raw pooled backbone output
+        patch_embeddings  : (B, P, embed_dim) per-patch embeddings before pooling
         """
-        backbone_features = self.backbone(x)          # (B, 768)
-        embeddings = self.proj_head(backbone_features) # (B, embed_dim)
-        predictions = self.reg_head(embeddings)        # (B, 1)
-        return embeddings, predictions, backbone_features
+        B, P, C, H, W = x.shape
 
+        # Flatten batch and patch dims → process all patches in one forward pass
+        x_flat = x.view(B * P, C, H, W)                   # (B*P, 3, H, W)
+        feat_flat = self.backbone(x_flat)                   # (B*P, backbone_out_dim)
+        emb_flat  = self.proj_head(feat_flat)               # (B*P, embed_dim)
+
+        # Reshape back to (B, P, embed_dim)
+        patch_embeddings = emb_flat.view(B, P, -1)          # (B, P, embed_dim)
+
+        # Attention pooling across patches → single image embedding
+        embeddings, _ = self.attn_pool(patch_embeddings)    # (B, embed_dim)
+
+        # MOS prediction from pooled embedding
+        predictions = self.reg_head(embeddings)             # (B, 1)
+
+        return embeddings, predictions, patch_embeddings
+    
     # ------------------------------------------------------------------ #
 
-    def extract_embeddings(self, x: torch.Tensor) -> torch.Tensor:
+     extract_embeddings(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Convenience: return only L2-normalised embeddings.
-
         Parameters
         ----------
-        x : (B, 3, H, W)
+        x : (defB, P, 3, H, W)
 
         Returns
         -------
-        (B, embed_dim)
+        (B, embed_dim)  attention-pooled L2-normalised embeddings
         """
         with torch.no_grad():
-            backbone_features = self.backbone(x)
-            embeddings = self.proj_head(backbone_features)
+            embeddings, _, _ = self.forward(x)
         return embeddings
 
     def predict_scores(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Convenience: return only MOS predictions.
-
         Parameters
         ----------
-        x : (B, 3, H, W)
+        x : (B, P, 3, H, W)
 
         Returns
         -------
-        (B, 1) quality scores in [0, 1]
+        (B, 1)
         """
         with torch.no_grad():
-            backbone_features = self.backbone(x)
-            embeddings = self.proj_head(backbone_features)
-            scores = self.reg_head(embeddings)
-        return scores
-
+            _, predictions, _ = self.forward(x)
+        return predictions
 
 def build_teacher(cfg: Config) -> TeacherModel:
     """

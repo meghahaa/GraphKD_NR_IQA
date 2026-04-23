@@ -86,6 +86,13 @@ class Config:
     knn_k: int = 8                    # Neighbours per node in the k-NN graph
 
     # ------------------------------------------------------------------ #
+    # Multi-patch sampling
+    # ------------------------------------------------------------------ #
+    num_patches: int = 4          # number of random patches per image
+    patch_resize: int = 384       # resize before random cropping
+    # patch crop size = image_size (224) — controlled by existing image_size field
+
+    # ------------------------------------------------------------------ #
     # Evaluation
     # ------------------------------------------------------------------ #
     eval_batch_size: int = 16

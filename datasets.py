@@ -38,23 +38,23 @@ from config import Config
 # Default augmentation pipelines
 # ------------------------------------------------------------------ #
 
-def get_train_transform(image_size: int = 224) -> transforms.Compose:
+def get_train_transform(image_size: int = 224, patch_resize: int = 384) -> transforms.Compose:
     """
-    Returns the training augmentation pipeline.
+    Returns the training transform for a SINGLE patch/view.
+    Called once per patch in the multi-patch pipeline.
 
     Parameters
     ----------
-    image_size : int
-        Target square size (H = W).
+    image_size   : int – final crop size (H = W)
+    patch_resize : int – resize before random crop (should be > image_size)
 
     Returns
     -------
     transforms.Compose
-        Composed transform suitable for training.
     """
     return transforms.Compose(
         [
-            transforms.Resize((image_size + 32, image_size + 32)), 
+            transforms.Resize((patch_resize, patch_resize)),
             transforms.RandomCrop(image_size),
             transforms.RandomHorizontalFlip(),
             transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
@@ -67,23 +67,24 @@ def get_train_transform(image_size: int = 224) -> transforms.Compose:
     )
 
 
-def get_val_transform(image_size: int = 224) -> transforms.Compose:
+def get_val_transform(image_size: int = 224, patch_resize: int = 384) -> transforms.Compose:
     """
-    Returns the deterministic validation/test transform.
+    Returns a deterministic center-crop transform for val/test.
+    Used for the global view; deterministic crops handled separately.
 
     Parameters
     ----------
-    image_size : int
-        Target square size (H = W).
+    image_size   : int
+    patch_resize : int
 
     Returns
     -------
     transforms.Compose
-        Composed transform suitable for inference.
     """
     return transforms.Compose(
         [
-            transforms.Resize((image_size, image_size)),
+            transforms.Resize((patch_resize, patch_resize)),
+            transforms.CenterCrop(image_size),
             transforms.ToTensor(),
             transforms.Normalize(
                 mean=[0.485, 0.456, 0.406],
@@ -91,6 +92,66 @@ def get_val_transform(image_size: int = 224) -> transforms.Compose:
             ),
         ]
     )
+
+
+def get_patch_transforms(
+    image_size: int = 224,
+    patch_resize: int = 384,
+    num_patches: int = 4,
+    is_train: bool = True,
+) -> List[transforms.Compose]:
+    """
+    Returns a list of transforms, one per patch view.
+
+    Training   : num_patches independent random crops from patch_resize
+    Validation : num_patches deterministic crops (4 corners + center if needed)
+
+    Parameters
+    ----------
+    image_size   : int
+    patch_resize : int
+    num_patches  : int
+    is_train     : bool
+
+    Returns
+    -------
+    List of transforms.Compose, length = num_patches
+    """
+    normalize = transforms.Normalize(
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225],
+    )
+
+    if is_train:
+        # Each patch gets its own independent random crop transform
+        patch_tfms = []
+        for _ in range(num_patches):
+            patch_tfms.append(
+                transforms.Compose([
+                    transforms.Resize((patch_resize, patch_resize)),
+                    transforms.RandomCrop(image_size),
+                    transforms.RandomHorizontalFlip(),
+                    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
+                    transforms.ToTensor(),
+                    normalize,
+                ])
+            )
+        return patch_tfms
+    else:
+        # Deterministic: evenly spaced crops covering the spatial extent
+        # Positions: top-left, top-right, bottom-left, bottom-right, center
+        positions = [
+            transforms.FiveCrop(image_size),   # returns tuple of 5 PIL images
+        ]
+        # We'll handle FiveCrop slicing in __getitem__ directly
+        # Return a single transform; dataset handles the splitting
+        return [
+            transforms.Compose([
+                transforms.Resize((patch_resize, patch_resize)),
+                transforms.ToTensor(),
+                normalize,
+            ])
+        ]
 
 
 # ------------------------------------------------------------------ #
@@ -275,18 +336,36 @@ def build_dataloaders(cfg: Config) -> Tuple[DataLoader, DataLoader, DataLoader]:
     test_idx = idx[n_train + n_val :].tolist()
 
     # ---- Build datasets --------------------------------------------- #
-    train_transform = get_train_transform(cfg.image_size)
-    val_transform = get_val_transform(cfg.image_size)
 
     full_dataset = IQADataset(df, transform=None, data_root=cfg.data_root)
 
     class _SubsetWithTransform(Dataset):
-        """Wraps a list of indices and applies a given transform."""
+        """
+        Wraps a list of indices and returns multi-patch tensors.
 
-        def __init__(self, base: IQADataset, indices: List[int], transform: Callable) -> None:
-            self.base = base
-            self.indices = indices
-            self.transform = transform
+        Each __getitem__ returns:
+            image   : (num_patches+1, 3, H, W)  — patches + 1 global view
+            mos     : scalar float
+            index   : int
+        """
+
+        def __init__(
+            self,
+            base: IQADataset,
+            indices: List[int],
+            global_transform: transforms.Compose,
+            patch_transforms: List[transforms.Compose],
+            is_train: bool,
+            image_size: int,
+            num_patches: int,
+        ) -> None:
+            self.base             = base
+            self.indices          = indices
+            self.global_transform = global_transform
+            self.patch_transforms = patch_transforms
+            self.is_train         = is_train
+            self.image_size       = image_size
+            self.num_patches      = num_patches
 
         def __len__(self) -> int:
             return len(self.indices)
@@ -294,16 +373,74 @@ def build_dataloaders(cfg: Config) -> Tuple[DataLoader, DataLoader, DataLoader]:
         def __getitem__(self, i: int) -> Dict[str, torch.Tensor]:
             real_idx = self.indices[i]
             img = Image.open(self.base.image_paths[real_idx]).convert("RGB")
-            img = self.transform(img)
+
+            # Global view
+            global_view = self.global_transform(img)   # (3, H, W)
+
+            # Patch views
+            if self.is_train:
+                # Each transform independently random-crops
+                patch_views = [tfm(img) for tfm in self.patch_transforms]  # num_patches × (3,H,W)
+            else:
+                # Deterministic: FiveCrop → pick num_patches evenly
+                resized = transforms.Resize(
+                    (self.patch_transforms[0].transforms[0].size
+                     if hasattr(self.patch_transforms[0].transforms[0], 'size')
+                     else 384)
+                )(img)
+                five_crops = transforms.FiveCrop(self.image_size)(resized)  # 5 PIL images
+                normalize  = transforms.Compose([
+                    transforms.ToTensor(),
+                    transforms.Normalize(
+                        mean=[0.485, 0.456, 0.406],
+                        std=[0.229, 0.224, 0.225],
+                    ),
+                ])
+                # Pick first num_patches from the five crops
+                patch_views = [normalize(c) for c in five_crops[:self.num_patches]]
+
+            # Stack: (num_patches+1, 3, H, W)
+            all_views = torch.stack([global_view] + patch_views, dim=0)
+
             return {
-                "image": img,
-                "mos": torch.tensor(self.base.mos[real_idx], dtype=torch.float32),
+                "image": all_views,                                              # (P+1, 3, H, W)
+                "mos":   torch.tensor(self.base.mos[real_idx], dtype=torch.float32),
                 "index": torch.tensor(real_idx, dtype=torch.long),
             }
+        
+    train_patch_tfms = get_patch_transforms(
+        cfg.image_size, cfg.patch_resize, cfg.num_patches, is_train=True
+    )
+    val_patch_tfms = get_patch_transforms(
+        cfg.image_size, cfg.patch_resize, cfg.num_patches, is_train=False
+    )
+    train_global_tfm = get_train_transform(cfg.image_size, cfg.patch_resize)
+    val_global_tfm   = get_val_transform(cfg.image_size, cfg.patch_resize)
 
-    train_ds = _SubsetWithTransform(full_dataset, train_idx, train_transform)
-    val_ds = _SubsetWithTransform(full_dataset, val_idx, val_transform)
-    test_ds = _SubsetWithTransform(full_dataset, test_idx, val_transform)
+    train_ds = _SubsetWithTransform(
+        full_dataset, train_idx,
+        global_transform=train_global_tfm,
+        patch_transforms=train_patch_tfms,
+        is_train=True,
+        image_size=cfg.image_size,
+        num_patches=cfg.num_patches,
+    )
+    val_ds = _SubsetWithTransform(
+        full_dataset, val_idx,
+        global_transform=val_global_tfm,
+        patch_transforms=val_patch_tfms,
+        is_train=False,
+        image_size=cfg.image_size,
+        num_patches=cfg.num_patches,
+    )
+    test_ds = _SubsetWithTransform(
+        full_dataset, test_idx,
+        global_transform=val_global_tfm,
+        patch_transforms=val_patch_tfms,
+        is_train=False,
+        image_size=cfg.image_size,
+        num_patches=cfg.num_patches,
+    )
 
     # ---- DataLoaders ------------------------------------------------ #
     train_loader = DataLoader(

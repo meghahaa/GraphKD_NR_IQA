@@ -380,6 +380,7 @@ def train_student(cfg: Config) -> Tuple[StudentModel, EvalResult]:
                 student, val_loader, device,
                 image_size=cfg.image_size,
                 amp=cfg.amp,
+                num_patches=cfg.num_patches,
             )
 
             tqdm.write(
@@ -437,6 +438,7 @@ def train_student(cfg: Config) -> Tuple[StudentModel, EvalResult]:
         student, test_loader, device,
         image_size=cfg.image_size,
         amp=False,
+        num_patches=cfg.num_patches,
     )
 
     print(f"\n[TEST] {test_result}\n")

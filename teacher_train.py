@@ -274,6 +274,7 @@ def train_teacher(cfg: Config) -> Tuple[TeacherModel, EvalResult]:
                 model, val_loader, device,
                 image_size=cfg.image_size,
                 amp=cfg.amp,
+                num_patches=cfg.num_patches,
             )
             tqdm.write(
                 f"\n  [VAL] Epoch {epoch+1}  "
@@ -329,6 +330,7 @@ def train_teacher(cfg: Config) -> Tuple[TeacherModel, EvalResult]:
         model, test_loader, device,
         image_size=cfg.image_size,
         amp=False,  # use full precision for final eval
+        num_patches=cfg.num_patches,
     )
     print(f"\n[TEST] {test_result}\n")
 

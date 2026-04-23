@@ -32,7 +32,7 @@ import timm
 
 from config import Config
 # Reuse the identical head classes from the teacher to keep consistency
-from teacher import ProjectionHead, RegressionHead
+from teacher import ProjectionHead, RegressionHead, AttentionPool
 
 
 class StudentModel(nn.Module):
@@ -69,6 +69,7 @@ class StudentModel(nn.Module):
 
         # ---- Heads (identical design to teacher) --------------------- #
         self.proj_head = ProjectionHead(self.backbone_out_dim, cfg.embed_dim)
+        self.attn_pool = AttentionPool(cfg.embed_dim)  
         self.reg_head  = RegressionHead(cfg.embed_dim)
 
     # ------------------------------------------------------------------ #
@@ -77,60 +78,56 @@ class StudentModel(nn.Module):
         self, x: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Full forward pass.
+        Multi-patch forward pass.
 
         Parameters
         ----------
-        x : Tensor of shape (B, 3, H, W)
-            Batch of RGB images, normalised to ImageNet stats.
+        x : (B, P, 3, H, W)
 
         Returns
         -------
-        embeddings        : (B, embed_dim)         L2-normalised projected features
-        predictions       : (B, 1)                 MOS prediction in [0, 1]
-        backbone_features : (B, backbone_out_dim)  raw pooled backbone output
+        embeddings       : (B, embed_dim)     attention-pooled L2-normalised
+        predictions      : (B, 1)             MOS prediction in [0, 1]
+        patch_embeddings : (B, P, embed_dim)  per-patch before pooling
         """
-        backbone_features = self.backbone(x)           # (B, 1280)
-        embeddings        = self.proj_head(backbone_features)  # (B, embed_dim)
-        predictions       = self.reg_head(embeddings)  # (B, 1)
-        return embeddings, predictions, backbone_features
+        B, P, C, H, W = x.shape
+        x_flat        = x.view(B * P, C, H, W)
+        feat_flat     = self.backbone(x_flat)              # (B*P, backbone_out_dim)
+        emb_flat      = self.proj_head(feat_flat)          # (B*P, embed_dim)
+        patch_embeddings = emb_flat.view(B, P, -1)         # (B, P, embed_dim)
+        embeddings, _ = self.attn_pool(patch_embeddings)   # (B, embed_dim)
+        predictions   = self.reg_head(embeddings)          # (B, 1)
+        return embeddings, predictions, patch_embeddings
 
     # ------------------------------------------------------------------ #
 
     def extract_embeddings(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Return only L2-normalised embeddings (inference / eval helper).
-
         Parameters
         ----------
-        x : (B, 3, H, W)
+        x : (B, P, 3, H, W)
 
         Returns
         -------
-        (B, embed_dim)
+        (B, embed_dim)  attention-pooled L2-normalised embeddings
         """
         with torch.no_grad():
-            backbone_features = self.backbone(x)
-            embeddings        = self.proj_head(backbone_features)
+            embeddings, _, _ = self.forward(x)
         return embeddings
 
     def predict_scores(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Return only MOS predictions (inference helper).
-
         Parameters
         ----------
-        x : (B, 3, H, W)
+        x : (B, P, 3, H, W)
 
         Returns
         -------
-        (B, 1)  quality scores in [0, 1]
+        (B, 1)
         """
         with torch.no_grad():
-            backbone_features = self.backbone(x)
-            embeddings        = self.proj_head(backbone_features)
-            scores            = self.reg_head(embeddings)
-        return scores
+            _, predictions, _ = self.forward(x)
+        return predictions
 
 
 def build_student(cfg: Config) -> StudentModel:

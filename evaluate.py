@@ -118,6 +118,7 @@ def _warmup_model(
     device: torch.device,
     image_size: int = 224,
     n_warmup: int = 5,
+    num_patches: int = 4,
 ) -> None:
     """
     Run a few dummy forward passes to initialise CUDA kernels.
@@ -131,7 +132,7 @@ def _warmup_model(
     """
     model.eval()
     with torch.no_grad():
-        dummy = torch.zeros(1, 3, image_size, image_size, device=device)
+        dummy = torch.zeros(1, num_patches + 1, 3, image_size, image_size, device=device)
         for _ in range(n_warmup):
             _ = model(dummy)
     if device.type == "cuda":
@@ -143,6 +144,7 @@ def measure_inference_time(
     device: torch.device,
     image_size: int = 224,
     n_runs: int = 50,
+    num_patches: int = 4,
 ) -> float:
     """
     Measure mean per-image inference latency (ms) using single-image batches.
@@ -160,10 +162,10 @@ def measure_inference_time(
     -------
     float – mean milliseconds per image
     """
-    _warmup_model(model, device, image_size)
+    _warmup_model(model, device, image_size,num_patches=num_patches)
 
     model.eval()
-    dummy = torch.zeros(1, 3, image_size, image_size, device=device)
+    dummy = torch.zeros(1, num_patches + 1, 3, image_size, image_size, device=device)
     times = []
 
     with torch.no_grad():
@@ -193,6 +195,7 @@ def evaluate_model(
     loader: DataLoader,
     device: torch.device,
     image_size: int = 224,
+    num_patches: int = 4,
     amp: bool = False,
     use_predictions_fn: Optional[callable] = None,
 ) -> EvalResult:
@@ -213,6 +216,7 @@ def evaluate_model(
     loader             : DataLoader – yields dicts with 'image' and 'mos'
     device             : torch.device
     image_size         : int – for timing measurement
+    num_patches        : int – for timing measurement (dummy input shape)
     amp                : bool – use torch.autocast for inference
     use_predictions_fn : callable | None
         Signature: (model, images) → Tensor of shape (B,)
@@ -256,7 +260,7 @@ def evaluate_model(
     mae   = float(np.mean(np.abs(all_preds - all_targets)))
     rmse  = float(np.sqrt(np.mean((all_preds - all_targets) ** 2)))
 
-    inf_ms     = measure_inference_time(model, device, image_size)
+    inf_ms     = measure_inference_time(model, device, image_size, num_patches=num_patches)
     n_params_M = count_parameters(model) / 1e6
     size_mb    = model_size_mb(model)
 
