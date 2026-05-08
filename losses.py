@@ -222,6 +222,7 @@ class TeacherTotalLoss(nn.Module):
         rank_loss  : scalar Tensor
         """
         reg  = self.reg_loss(predictions, targets)
-        rank = self.rank_loss(predictions, targets)
+        # rank = self.rank_loss(predictions, targets)
+        rank = 0.0 # Disable ranking loss for now (ablation)
         total = self.lambda_reg * reg + self.lambda_rank * rank
         return total, reg, rank

@@ -406,15 +406,11 @@ def _load_koniq10k(csv_path: str, data_root: str) -> pd.DataFrame:
     """
     df = pd.read_csv(csv_path)
     # Column names may vary; try common variants
-    img_col = next(
-        (c for c in df.columns if "image" in c.lower() or "name" in c.lower()), df.columns[0]
-    )
-    mos_col = next(
-        (c for c in df.columns if "mos" in c.lower()), df.columns[-1]
-    )
+    img_col = "image_name"
+    mos_col = "MOS"
     df = df.rename(columns={img_col: "image_path", mos_col: "mos"})
     df["image_path"] = df["image_path"].apply(
-        lambda x: os.path.join(data_root, "1024x768", str(x))
+        lambda x: os.path.join(data_root, str(x))
     )
     return df[["image_path", "mos"]]
 
