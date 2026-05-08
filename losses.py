@@ -223,6 +223,6 @@ class TeacherTotalLoss(nn.Module):
         """
         reg  = self.reg_loss(predictions, targets)
         # rank = self.rank_loss(predictions, targets)
-        rank = 0.0 # Disable ranking loss for now (ablation)
+        rank = torch.tensor(0.0, device=predictions.device)  # Disable ranking loss for now (ablation)
         total = self.lambda_reg * reg + self.lambda_rank * rank
         return total, reg, rank

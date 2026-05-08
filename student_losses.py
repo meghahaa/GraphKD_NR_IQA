@@ -377,7 +377,7 @@ class StudentTotalLoss(nn.Module):
         """
         reg   = self.reg_loss(s_pred, targets)
         # rank  = self.rank_loss(s_pred, targets)
-        rank = 0.0 # Disable ranking loss for now (ablation)
+        rank  = torch.tensor(0.0, device=s_pred.device)  # Disable ranking loss for now (ablation)
         graph = self.graph_loss(t_emb, s_emb, t_scores, bank)
 
         total = (
