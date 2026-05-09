@@ -244,7 +244,8 @@ class GraphAlignmentLoss(nn.Module):
         t_emb:    torch.Tensor,            # (B, embed_dim)
         s_emb:    torch.Tensor,            # (B, embed_dim)
         t_scores: torch.Tensor,            # (B,)
-        bank:     Optional[MemoryBank] = None,
+        t_bank:     Optional[MemoryBank] = None,
+        s_bank:     Optional[MemoryBank] = None,
     ) -> torch.Tensor:
         """
         Parameters
@@ -252,7 +253,8 @@ class GraphAlignmentLoss(nn.Module):
         t_emb    : (B, embed_dim)  teacher embeddings (L2-normalised)
         s_emb    : (B, embed_dim)  student embeddings (L2-normalised)
         t_scores : (B,)            teacher quality predictions
-        bank     : MemoryBank | None
+        t_bank   : MemoryBank | None
+        s_bank   : MemoryBank | None
 
         Returns
         -------
@@ -261,14 +263,16 @@ class GraphAlignmentLoss(nn.Module):
         device = t_emb.device
 
         # ---- Optionally augment with memory bank -------------------- #
-        if bank is not None and len(bank) > 0:
-            bank_emb, bank_scores = bank.get(device)       # (M, E), (M,)
+        if t_bank is not None and len(t_bank) > 0:
+            bank_t_emb, bank_scores = t_bank.get(device)       # (M, E), (M,)
+            bank_s_emb, _ = s_bank.get(device)
+
 
             # Concatenate batch + bank;  L2-renormalise student side
-            t_full = torch.cat([t_emb, bank_emb], dim=0)  # (B+M, E)
+            t_full = torch.cat([t_emb, bank_t_emb], dim=0)  # (B+M, E)
             s_full = torch.cat([
                 s_emb,
-                bank_emb,           # teacher bank used as anchor for student too
+                bank_s_emb,           
             ], dim=0)               # (B+M, E)
             scores_full = torch.cat([t_scores, bank_scores], dim=0)  # (B+M,)
         else:
@@ -356,7 +360,8 @@ class StudentTotalLoss(nn.Module):
         t_emb:    torch.Tensor,            # (B, embed_dim)  teacher, detached
         s_emb:    torch.Tensor,            # (B, embed_dim)  student
         t_scores: torch.Tensor,            # (B,)
-        bank:     Optional[MemoryBank] = None,
+        t_bank:     Optional[MemoryBank] = None,
+        s_bank:     Optional[MemoryBank] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Parameters
@@ -366,7 +371,8 @@ class StudentTotalLoss(nn.Module):
         t_emb    : (B, embed_dim)  detached teacher embeddings
         s_emb    : (B, embed_dim)  student embeddings (gradient-bearing)
         t_scores : (B,)            teacher scores (for memory bank augmentation)
-        bank     : MemoryBank | None
+        t_bank   : MemoryBank | None
+        s_bank   : MemoryBank | None
 
         Returns
         -------
@@ -378,7 +384,7 @@ class StudentTotalLoss(nn.Module):
         reg   = self.reg_loss(s_pred, targets)
         # rank  = self.rank_loss(s_pred, targets)
         rank  = torch.tensor(0.0, device=s_pred.device)  # Disable ranking loss for now (ablation)
-        graph = self.graph_loss(t_emb, s_emb, t_scores, bank)
+        graph = self.graph_loss(t_emb, s_emb, t_scores, t_bank, s_bank)
 
         total = (
             self.lambda_reg   * reg

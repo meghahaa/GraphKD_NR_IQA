@@ -111,7 +111,8 @@ def train_one_epoch(
     criterion: StudentTotalLoss,
     optimizer: torch.optim.Optimizer,
     scaler:    GradScaler,
-    bank:      Optional[MemoryBank],
+    t_bank:      Optional[MemoryBank],
+    s_bank:      Optional[MemoryBank],
     device:    torch.device,
     epoch:     int,
     cfg:       Config,
@@ -128,7 +129,8 @@ def train_one_epoch(
     criterion : StudentTotalLoss
     optimizer : Optimizer
     scaler    : GradScaler       – AMP scaler (identity when cfg.amp=False)
-    bank      : MemoryBank|None  – relational context memory bank
+    t_bank    : MemoryBank|None  – teacher relational context memory bank
+    s_bank    : MemoryBank|None  – student relational context memory bank
     device    : torch.device
     epoch     : int              – 0-indexed
     cfg       : Config
@@ -176,14 +178,14 @@ def train_one_epoch(
                 total, reg, rank, graph = criterion(
                     s_pred.float(), targets,
                     t_emb, s_emb.float(),
-                    t_scores, bank,
+                    t_scores, t_bank, s_bank
                 )
         else:
             s_emb, s_pred, _ = student(images)
             total, reg, rank, graph = criterion(
                 s_pred, targets,
                 t_emb, s_emb,
-                t_scores, bank,
+                t_scores, t_bank, s_bank
             )
 
         # ---- Backward ---------------------------------------------- #
@@ -199,8 +201,10 @@ def train_one_epoch(
             optimizer.step()
 
         # ---- Update memory bank ------------------------------------ #
-        if bank is not None:
-            bank.update(t_emb, t_scores)
+        if t_bank is not None:
+            t_bank.update(t_emb, t_scores)
+        if s_bank is not None:
+            s_bank.update(s_emb, t_scores)  # use teacher scores as anchor for student bank too
 
         # ---- Meters + tqdm postfix --------------------------------- #
         meters["total"].update(total.item(), B)
@@ -270,9 +274,15 @@ def train_student(cfg: Config) -> Tuple[StudentModel, EvalResult]:
         start_epoch = ckpt.get("epoch", 0)
 
     # ---- Memory Bank ----------------------------------------------- #
-    bank: Optional[MemoryBank] = None
+    t_bank: Optional[MemoryBank] = None
+    s_bank: Optional[MemoryBank] = None
     if cfg.use_memory_bank:
-        bank = MemoryBank(
+        t_bank = MemoryBank(
+            size=cfg.memory_bank_size,
+            embed_dim=cfg.embed_dim,
+            device=device,
+        )
+        s_bank = MemoryBank(
             size=cfg.memory_bank_size,
             embed_dim=cfg.embed_dim,
             device=device,
@@ -350,7 +360,7 @@ def train_student(cfg: Config) -> Tuple[StudentModel, EvalResult]:
         train_metrics = train_one_epoch(
             teacher, student, train_loader,
             criterion, optimizer, scaler,
-            bank, device, epoch, cfg,
+            t_bank,s_bank, device, epoch, cfg,
             pbar=pbar  
         )
 
