@@ -345,6 +345,8 @@ class StudentTotalLoss(nn.Module):
         self.lambda_reg   = cfg.lambda_reg_student
         self.lambda_rank  = cfg.lambda_rank_student
         self.lambda_graph = cfg.lambda_graph
+        self.bank_warmup_steps = cfg.bank_warmup_steps  # ← add to config
+
 
         self.reg_loss   = MOSRegressionLoss(beta=1.0)
         self.rank_loss  = PairwiseRankingLoss(
@@ -360,6 +362,7 @@ class StudentTotalLoss(nn.Module):
         t_emb:    torch.Tensor,            # (B, embed_dim)  teacher, detached
         s_emb:    torch.Tensor,            # (B, embed_dim)  student
         t_scores: torch.Tensor,            # (B,)
+        global_step: int,
         t_bank:     Optional[MemoryBank] = None,
         s_bank:     Optional[MemoryBank] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -384,7 +387,12 @@ class StudentTotalLoss(nn.Module):
         reg   = self.reg_loss(s_pred, targets)
         # rank  = self.rank_loss(s_pred, targets)
         rank  = torch.tensor(0.0, device=s_pred.device)  # Disable ranking loss for now (ablation)
-        graph = self.graph_loss(t_emb, s_emb, t_scores, t_bank, s_bank)
+        use_bank = global_step >= self.bank_warmup_steps
+        graph = self.graph_loss(
+            t_emb, s_emb, t_scores,
+            t_bank if use_bank else None,
+            s_bank if use_bank else None,
+        )
 
         total = (
             self.lambda_reg   * reg

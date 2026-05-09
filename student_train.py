@@ -116,6 +116,7 @@ def train_one_epoch(
     device:    torch.device,
     epoch:     int,
     cfg:       Config,
+    global_step: int,
     pbar:      Optional[tqdm] = None,
 ) -> Dict[str, float]:
     """
@@ -178,33 +179,33 @@ def train_one_epoch(
                 total, reg, rank, graph = criterion(
                     s_pred.float(), targets,
                     t_emb, s_emb.float(),
-                    t_scores, t_bank, s_bank
+                    t_scores, global_step, t_bank, s_bank
                 )
         else:
             s_emb, s_pred, _ = student(images)
             total, reg, rank, graph = criterion(
                 s_pred, targets,
                 t_emb, s_emb,
-                t_scores, t_bank, s_bank
+                t_scores, global_step, t_bank, s_bank
             )
 
         # ---- Backward ---------------------------------------------- #
         if use_amp:
             scaler.scale(total).backward()
             scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(student.parameters(), max_norm=5.0)
+            nn.utils.clip_grad_norm_(student.parameters(), max_norm=3.0)
             scaler.step(optimizer)
             scaler.update()
         else:
             total.backward()
-            nn.utils.clip_grad_norm_(student.parameters(), max_norm=5.0)
+            nn.utils.clip_grad_norm_(student.parameters(), max_norm=3.0)
             optimizer.step()
 
         # ---- Update memory bank ------------------------------------ #
         if t_bank is not None:
             t_bank.update(t_emb, t_scores)
         if s_bank is not None:
-            s_bank.update(s_emb, t_scores)  # use teacher scores as anchor for student bank too
+            s_bank.update(s_emb.detach().float(), t_scores)  # use teacher scores as anchor for student bank too
 
         # ---- Meters + tqdm postfix --------------------------------- #
         meters["total"].update(total.item(), B)
@@ -221,6 +222,8 @@ def train_one_epoch(
                 graph=f"{meters['graph'].avg:.4f}",
             )
 
+        global_step += 1
+
     current_lr = optimizer.param_groups[0]["lr"]
 
     return {
@@ -229,6 +232,7 @@ def train_one_epoch(
         "rank":  meters["rank"].avg,
         "graph": meters["graph"].avg,
         "lr":    current_lr,
+        "global_step": global_step,
     }
 
 
@@ -276,6 +280,7 @@ def train_student(cfg: Config) -> Tuple[StudentModel, EvalResult]:
     # ---- Memory Bank ----------------------------------------------- #
     t_bank: Optional[MemoryBank] = None
     s_bank: Optional[MemoryBank] = None
+    global_step = 0   # ← tracks total batches seen across all epochs
     if cfg.use_memory_bank:
         t_bank = MemoryBank(
             size=cfg.memory_bank_size,
@@ -360,13 +365,14 @@ def train_student(cfg: Config) -> Tuple[StudentModel, EvalResult]:
         train_metrics = train_one_epoch(
             teacher, student, train_loader,
             criterion, optimizer, scaler,
-            t_bank,s_bank, device, epoch, cfg,
+            t_bank,s_bank, device, epoch, cfg, global_step,
             pbar=pbar  
         )
 
         pbar.close()
         scheduler.step()
         epoch_time = time.time() - t0
+        global_step = train_metrics.get("global_step", global_step)  # update global_step from train_one_epoch
 
         tqdm.write(
         f"Epoch {epoch+1}/{cfg.student_epochs} "

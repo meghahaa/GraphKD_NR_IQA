@@ -83,6 +83,7 @@ class Config:
     # ------------------------------------------------------------------ #
     use_memory_bank: bool = True
     memory_bank_size: int = 1024      # Number of feature vectors stored
+    bank_warmup_steps: int = 1000    # Number of steps to warm up the memory bank
     knn_k: int = 8                    # Neighbours per node in the k-NN graph
 
     # ------------------------------------------------------------------ #
