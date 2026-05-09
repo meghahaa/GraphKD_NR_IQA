@@ -193,12 +193,12 @@ def train_one_epoch(
         if use_amp:
             scaler.scale(total).backward()
             scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(student.parameters(), max_norm=3.0)
+            nn.utils.clip_grad_norm_(student.parameters(), max_norm=5.0)
             scaler.step(optimizer)
             scaler.update()
         else:
             total.backward()
-            nn.utils.clip_grad_norm_(student.parameters(), max_norm=3.0)
+            nn.utils.clip_grad_norm_(student.parameters(), max_norm=5.0)
             optimizer.step()
 
         # ---- Update memory bank ------------------------------------ #
