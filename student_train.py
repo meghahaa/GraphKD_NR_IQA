@@ -59,12 +59,24 @@ from utils import (
     set_seed,
 )
 
+def _get_state_dict(model: nn.Module) -> dict:
+    """Always returns plain state dict without 'module.' prefix."""
+    if isinstance(model, nn.DataParallel):
+        return model.module.state_dict()
+    return model.state_dict()
+
+
+def _unwrap(model: nn.Module) -> nn.Module:
+    """Returns the underlying module if DataParallel-wrapped."""
+    if isinstance(model, nn.DataParallel):
+        return model.module
+    return model
 
 # ------------------------------------------------------------------ #
 # Load frozen teacher
 # ------------------------------------------------------------------ #
 
-def load_frozen_teacher(cfg: Config, device: torch.device) -> TeacherModel:
+def load_frozen_teacher(cfg: Config, device: torch.device) -> nn.Module:
     """
     Instantiate the teacher, load its checkpoint, freeze all parameters,
     and set it to eval mode.
@@ -96,17 +108,21 @@ def load_frozen_teacher(cfg: Config, device: torch.device) -> TeacherModel:
         p.requires_grad = False
     teacher.eval()
 
+    n_gpus = torch.cuda.device_count()
+    if cfg.student_data_parallel and n_gpus > 1 and device.type == "cuda":
+        teacher = nn.DataParallel(teacher)
+        print(f"[student_train] Teacher wrapped in DataParallel ({n_gpus} GPUs)")
+
     print(f"[student_train] Teacher loaded and frozen from '{cfg.teacher_ckpt}'")
     return teacher
-
 
 # ------------------------------------------------------------------ #
 # One training epoch
 # ------------------------------------------------------------------ #
 
 def train_one_epoch(
-    teacher:   TeacherModel,
-    student:   StudentModel,
+    teacher:   nn.Module,  # frozen; may be DataParallel-wrapped,
+    student:   nn.Module,  # may be DataParallel-wrapped
     loader:    DataLoader,
     criterion: StudentTotalLoss,
     optimizer: torch.optim.Optimizer,
@@ -193,12 +209,12 @@ def train_one_epoch(
         if use_amp:
             scaler.scale(total).backward()
             scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(student.parameters(), max_norm=5.0)
+            nn.utils.clip_grad_norm_(_unwrap(student).parameters(), max_norm=5.0)
             scaler.step(optimizer)
             scaler.update()
         else:
             total.backward()
-            nn.utils.clip_grad_norm_(student.parameters(), max_norm=5.0)
+            nn.utils.clip_grad_norm_(_unwrap(student).parameters(), max_norm=5.0)
             optimizer.step()
 
         # ---- Update memory bank ------------------------------------ #
@@ -269,13 +285,24 @@ def train_student(cfg: Config) -> Tuple[StudentModel, EvalResult]:
     print_model_info(teacher, name="Teacher (frozen)")
 
     # ---- Student --------------------------------------------------- #
-    student = build_student(cfg).to(device)
-    print_model_info(student, name="Student")
+    # Build plain first, load checkpoint, THEN wrap DataParallel
+    student_plain = build_student(cfg).to(device)
+    print_model_info(student_plain, name="Student")
 
     start_epoch = 0
     if cfg.student_ckpt and os.path.isfile(cfg.student_ckpt):
-        ckpt = load_checkpoint(cfg.student_ckpt, student, device=device)
+        ckpt = load_checkpoint(cfg.student_ckpt, student_plain, device=device)
         start_epoch = ckpt.get("epoch", 0)
+
+    n_gpus = torch.cuda.device_count()
+    use_dp = cfg.student_data_parallel and n_gpus > 1 and device.type == "cuda"
+    if use_dp:
+        student = nn.DataParallel(student_plain)
+        print(f"[student_train] Student wrapped in DataParallel ({n_gpus} GPUs)")
+        print(f"[student_train] Per-GPU batch: {cfg.student_batch_size}  "
+              f"Effective batch: {cfg.student_batch_size * n_gpus}")
+    else:
+        student = student_plain
 
     # ---- Memory Bank ----------------------------------------------- #
     t_bank: Optional[MemoryBank] = None
@@ -299,7 +326,7 @@ def train_student(cfg: Config) -> Tuple[StudentModel, EvalResult]:
 
     # ---- Optimiser + Schedule -------------------------------------- #
     optimizer = torch.optim.AdamW(
-        student.parameters(),
+        student_plain.parameters(),
         lr=cfg.student_lr,
         weight_decay=cfg.student_weight_decay,
     )
@@ -393,7 +420,7 @@ def train_student(cfg: Config) -> Tuple[StudentModel, EvalResult]:
         )
         if do_eval:
             result = evaluate_model(
-                student, val_loader, device,
+                _unwrap(student), val_loader, device,
                 image_size=cfg.image_size,
                 amp=cfg.amp,
                 num_patches=cfg.num_patches,
@@ -415,7 +442,7 @@ def train_student(cfg: Config) -> Tuple[StudentModel, EvalResult]:
             # Save checkpoints
             state = {
                 "epoch":                epoch + 1,
-                "model_state_dict":     student.state_dict(),
+                "model_state_dict":     _get_state_dict(student),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "best_srcc":            best_srcc,
                 "config":               vars(cfg),
@@ -451,7 +478,7 @@ def train_student(cfg: Config) -> Tuple[StudentModel, EvalResult]:
         load_checkpoint(best_ckpt, student, device=device)
 
     test_result = evaluate_model(
-        student, test_loader, device,
+        _unwrap(student), test_loader, device,
         image_size=cfg.image_size,
         amp=False,
         num_patches=cfg.num_patches,

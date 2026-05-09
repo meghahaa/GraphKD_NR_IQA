@@ -58,6 +58,7 @@ class Config:
     student_weight_decay: float = 1e-4
     student_batch_size: int = 8
     student_warmup_epochs: int = 5
+    student_data_parallel: bool = False  # Whether to use DataParallel for student (set True if GPU VRAM allows)
 
     lambda_rank_student: float = 1.0
     lambda_reg_student: float = 1.0
